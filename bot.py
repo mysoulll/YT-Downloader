@@ -7,9 +7,9 @@ from moviepy.editor import VideoFileClip
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ChatAction
+    InlineKeyboardMarkup
 )
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,9 +19,9 @@ from telegram.ext import (
     ContextTypes
 )
 
-# Konfigurasi untuk Railway
+# Railway configuration
 PORT = int(os.environ.get('PORT', 5000))
-TOKEN = os.environ.get('TELEGRAM_TOKEN')  # Diambil dari env variables
+TOKEN = os.environ.get('TELEGRAM_TOKEN')  # From env variables
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
 
 # Setup logging
@@ -31,11 +31,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Direktori temporary (Railway menggunakan ephemeral storage)
+# Temporary directory (Railway uses ephemeral storage)
 TEMP_DIR = "/tmp/yt_downloads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Ikon untuk UI
+# Icons for UI
 ICONS = {
     'welcome': '🎬✨',
     'success': '✅🎉',
@@ -48,17 +48,17 @@ ICONS = {
 user_state: Dict[int, Dict] = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /start"""
+    """Handler for /start command"""
     welcome_msg = (
         f"{ICONS['welcome']} *YouTube Downloader*\n\n"
-        "Saya bisa mengunduh video YouTube dan mengkonversinya ke MP3/MP4.\n\n"
-        "🔹 *Cara menggunakan*:\n"
-        "1. Kirim /download\n"
-        "2. Tempel link YouTube\n"
-        "3. Pilih format\n\n"
-        "⚠️ *Catatan*:\n"
-        "- Bot ini hanya untuk video <50MB\n"
-        "- Hasil download bersifat sementara"
+        "I can download YouTube videos and convert them to MP3/MP4.\n\n"
+        "🔹 *How to use*:\n"
+        "1. Send /download\n"
+        "2. Paste YouTube link\n"
+        "3. Choose format\n\n"
+        "⚠️ *Note*:\n"
+        "- Bot works for videos <50MB\n"
+        "- Downloads are temporary"
     )
     
     buttons = [
@@ -72,19 +72,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses permintaan download"""
+    """Process download request"""
     query = update.callback_query
     await query.answer()
     
     await query.edit_message_text(
-        f"{ICONS['download']} Kirim link YouTube yang ingin diunduh\n\n"
-        "Contoh: https://youtu.be/example",
+        f"{ICONS['download']} Send the YouTube link you want to download\n\n"
+        "Example: https://youtu.be/example",
         parse_mode='Markdown'
     )
     user_state[update.effective_user.id] = {"waiting_for": "url"}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses pesan berisi URL"""
+    """Process message containing URL"""
     user_id = update.effective_user.id
     
     if user_id in user_state and user_state[user_id].get("waiting_for") == "url":
@@ -92,7 +92,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not re.match(r'^(https?://)?(www\.)?(youtube|youtu)\.', url):
             await update.message.reply_text(
-                f"{ICONS['error']} URL tidak valid!",
+                f"{ICONS['error']} Invalid URL!",
                 parse_mode='Markdown'
             )
             return
@@ -112,7 +112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(
                 f"📌 *{user_state[user_id]['title']}*\n"
-                "Pilih format:",
+                "Choose format:",
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode='Markdown'
             )
@@ -120,25 +120,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error: {e}")
             await update.message.reply_text(
-                f"{ICONS['error']} Gagal memproses video",
+                f"{ICONS['error']} Failed to process video",
                 parse_mode='Markdown'
             )
 
 async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses download berdasarkan pilihan"""
+    """Process download based on selection"""
     query = update.callback_query
     await query.answer()
     
     user_id = update.effective_user.id
     if user_id not in user_state:
-        await query.edit_message_text(f"{ICONS['error']} Sesi expired!")
+        await query.edit_message_text(f"{ICONS['error']} Session expired!")
         return
     
     format_type = query.data
     url = user_state[user_id]["url"]
     
     try:
-        await query.edit_message_text(f"{ICONS['download']} Memulai download...")
+        await query.edit_message_text(f"{ICONS['download']} Starting download...")
         yt = YouTube(url)
         
         if format_type == 'mp3':
@@ -148,13 +148,15 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Download error: {e}")
-        await query.edit_message_text(f"{ICONS['error']} Gagal mengunduh!")
+        await query.edit_message_text(f"{ICONS['error']} Download failed!")
 
 async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: YouTube):
-    """Download dan konversi ke MP3"""
+    """Download and convert to MP3"""
     chat_id = update.effective_chat.id
     
     try:
+        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_AUDIO)
+        
         # Download video
         video_path = yt.streams.filter(
             progressive=True,
@@ -172,8 +174,7 @@ async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: Y
         audio_clip.close()
         video_clip.close()
         
-        # Kirim file
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_AUDIO)
+        # Send file
         with open(mp3_path, 'rb') as audio_file:
             await context.bot.send_audio(
                 chat_id=chat_id,
@@ -182,13 +183,13 @@ async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: Y
                 performer=yt.author
             )
         
-        # Bersihkan file
+        # Clean up
         os.remove(video_path)
         os.remove(mp3_path)
         
         await context.bot.send_message(
             chat_id,
-            f"{ICONS['success']} Berhasil diunduh sebagai MP3!"
+            f"{ICONS['success']} Successfully downloaded as MP3!"
         )
         
     except Exception as e:
@@ -196,10 +197,12 @@ async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: Y
         raise
 
 async def download_mp4(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: YouTube):
-    """Download sebagai MP4"""
+    """Download as MP4"""
     chat_id = update.effective_chat.id
     
     try:
+        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+        
         video = yt.streams.filter(
             progressive=True,
             file_extension='mp4'
@@ -210,7 +213,6 @@ async def download_mp4(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: Y
             filename="video.mp4"
         )
         
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
         with open(video_path, 'rb') as video_file:
             await context.bot.send_video(
                 chat_id=chat_id,
@@ -221,19 +223,19 @@ async def download_mp4(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: Y
         os.remove(video_path)
         await context.bot.send_message(
             chat_id,
-            f"{ICONS['success']} Berhasil diunduh sebagai MP4!"
+            f"{ICONS['success']} Successfully downloaded as MP4!"
         )
         
     except Exception as e:
         logger.error(f"MP4 error: {e}")
         raise
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.error("Exception:", exc_info=context.error)
-    if update.message:
+    if isinstance(update, Update) and update.message:
         await update.message.reply_text(
-            f"{ICONS['error']} Terjadi error. Coba lagi nanti.",
+            f"{ICONS['error']} An error occurred. Please try again later.",
             parse_mode='Markdown'
         )
 
