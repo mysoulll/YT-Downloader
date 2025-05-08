@@ -1,15 +1,17 @@
 import os
 import re
 import logging
+import asyncio
 from typing import Dict
 from pytube import YouTube
 from moviepy.editor import VideoFileClip
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    InputMediaPhoto
 )
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,10 +22,9 @@ from telegram.ext import (
     ConversationHandler
 )
 
-# Konfigurasi
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-PORT = int(os.getenv('PORT', 5000))
-TEMP_DIR = "/tmp/yt_downloads"
+# Configuration
+TOKEN = os.getenv('TELEGRAM_TOKEN') or "YOUR_BOT_TOKEN"  # Fallback for local testing
+TEMP_DIR = "temp_downloads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Setup logging
@@ -33,322 +34,356 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# State conversation
-SELECTING_ACTION, PROCESSING_LINK, CHOOSING_FORMAT = range(3)
+# Conversation states
+MENU, PROCESSING_LINK, CHOOSING_FORMAT = range(3)
 
-# Ikon untuk UI
-ICONS = {
-    'menu': '📱',
-    'download': '⏬',
-    'success': '✅',
-    'error': '❌',
-    'audio': '🎧',
-    'video': '🎥',
-    'loading': '⏳'
-}
+class BotUI:
+    """Class for rich interactive UI elements"""
+    @staticmethod
+    async def show_main_menu(update: Update):
+        """Show beautiful main menu with interactive buttons"""
+        menu_text = """
+🌟 <b>YouTube Downloader Premium</b> 🌟
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menampilkan menu utama"""
-    await show_main_menu(update, context)
-    return SELECTING_ACTION
+🎬 Download video/audio from YouTube
+🎧 Convert to MP3 with high quality
+🎥 Get videos in HD resolution
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menampilkan menu utama dengan tombol interaktif"""
-    menu_text = (
-        f"{ICONS['menu']} *YouTube Downloader*\n\n"
-        "Pilih aksi yang ingin dilakukan:"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton(f"{ICONS['download']} Download", callback_data='download')],
-        [InlineKeyboardButton("ℹ️ Bantuan", callback_data='help')]
-    ]
-    
-    if isinstance(update, Update) and update.message:
-        await update.message.reply_text(
-            menu_text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode='Markdown'
-        )
-    else:
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text(
-            menu_text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode='Markdown'
-        )
-
-async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses permintaan download"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        f"{ICONS['download']} Silakan kirim link YouTube yang ingin diunduh:\n\n"
-        "Contoh: https://youtu.be/contoh",
-        parse_mode='Markdown'
-    )
-    return PROCESSING_LINK
-
-async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses link YouTube yang diterima"""
-    url = update.message.text
-    user_id = update.effective_user.id
-    
-    # Validasi URL
-    if not re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.?be)/', url):
-        await update.message.reply_text(
-            f"{ICONS['error']} URL YouTube tidak valid!",
-            parse_mode='Markdown'
-        )
-        await show_main_menu(update, context)
-        return SELECTING_ACTION
-    
-    try:
-        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+Choose an option:"""
         
-        # Dapatkan info video
-        yt = YouTube(url)
-        context.user_data['yt'] = {
-            'url': url,
-            'title': yt.title,
-            'author': yt.author,
-            'length': yt.length
-        }
-        
-        # Tampilkan pilihan format
         buttons = [
-            [
-                InlineKeyboardButton(f"{ICONS['audio']} MP3 (Audio)", callback_data='mp3'),
-                InlineKeyboardButton(f"{ICONS['video']} MP4 (Video)", callback_data='mp4')
-            ],
-            [InlineKeyboardButton("⬅️ Kembali", callback_data='cancel')]
+            [InlineKeyboardButton("📥 Download Content", callback_data='download')],
+            [InlineKeyboardButton("⚙️ Settings", callback_data='settings'),
+             InlineKeyboardButton("ℹ️ Help", callback_data='help')]
         ]
         
-        duration = f"{yt.length // 60}:{yt.length % 60:02d}"
         await update.message.reply_text(
-            f"📌 *{yt.title[:60]}*\n"
-            f"👤 {yt.author} | ⏱ {duration}\n\n"
-            "Pilih format yang diinginkan:",
+            text=menu_text,
             reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode='Markdown'
+            parse_mode=ParseMode.HTML
         )
-        
-        return CHOOSING_FORMAT
-        
- except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text(
-            f"{ICONS['error']} Gagal memproses video. Pastikan link benar dan coba lagi.",
-            parse_mode='Markdown'
-        )
-        await show_main_menu(update, context)
-        return SELECTING_ACTION
 
-async def process_format_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Memproses pilihan format"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == 'cancel':
-        await show_main_menu(update, context)
-        return SELECTING_ACTION
-    
-    format_type = query.data
-    yt_info = context.user_data['yt']
-    
-    try:
-        await query.edit_message_text(
-            f"{ICONS['loading']} Memulai proses download {format_type.upper()}...",
-            parse_mode='Markdown'
-        )
+    @staticmethod
+    async def show_video_info(update: Update, yt: YouTube):
+        """Show beautiful video info card"""
+        duration = f"{yt.length // 60}:{yt.length % 60:02d}"
+        views = f"{yt.views:,}".replace(",", ".")
         
-        yt = YouTube(yt_info['url'])
+        caption = f"""
+🎬 <b>{yt.title}</b>
+
+👤 <i>Channel:</i> {yt.author}
+⏱ <i>Duration:</i> {duration}
+👀 <i>Views:</i> {views}
+
+Choose download format:"""
         
-        if format_type == 'mp3':
-            await download_mp3(update, context, yt)
+        buttons = [
+            [InlineKeyboardButton("🎧 MP3 (Audio)", callback_data='mp3'),
+             InlineKeyboardButton("🎥 MP4 (Video)", callback_data='mp4')],
+            [InlineKeyboardButton("📺 Preview", callback_data='preview'),
+             InlineKeyboardButton("⬅️ Back", callback_data='back')]
+        ]
+        
+        try:
+            # Try to send with thumbnail
+            thumb_url = yt.thumbnail_url.replace('default.jpg', 'hqdefault.jpg')
+            await update.message.reply_photo(
+                photo=thumb_url,
+                caption=caption,
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Error sending thumbnail: {e}")
+            await update.message.reply_text(
+                text=caption,
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=ParseMode.HTML
+            )
+
+    @staticmethod
+    async def show_progress(update: Update, current: int, total: int, file_type: str):
+        """Show beautiful progress bar"""
+        percent = current / total
+        progress_bar = "🟩" * int(percent * 10) + "⬜️" * (10 - int(percent * 10))
+        
+        text = f"""
+⏳ <b>Downloading {file_type.upper()}...</b>
+
+{progress_bar} {percent:.1%}
+
+📦 {current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB"""
+        
+        try:
+            await update.callback_query.edit_message_text(
+                text=text,
+                parse_mode=ParseMode.HTML
+            )
+        except:
+            pass
+
+class YouTubeDownloader:
+    """Core downloader functionality"""
+    @staticmethod
+    async def download_video(yt: YouTube, quality: str = "highest"):
+        """Download YouTube video"""
+        if quality == "highest":
+            stream = yt.streams.filter(
+                progressive=True,
+                file_extension='mp4'
+            ).order_by('resolution').desc().first()
         else:
-            await download_mp4(update, context, yt)
-            
-        await show_main_menu(update, context)
-        return SELECTING_ACTION
+            stream = yt.streams.filter(
+                progressive=True,
+                file_extension='mp4',
+                resolution=quality
+            ).first()
         
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        await query.edit_message_text(
-            f"{ICONS['error']} Gagal mengunduh {format_type.upper()}",
-            parse_mode='Markdown'
-        )
-        await show_main_menu(update, context)
-        return SELECTING_ACTION
+        return stream.download(output_path=TEMP_DIR)
 
-async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: YouTube):
-    """Download dan konversi ke MP3"""
-    chat_id = update.effective_chat.id
-    
-    try:
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_AUDIO)
-        
-        # Download video
-        video_path = yt.streams.filter(
-            progressive=True,
-            file_extension='mp4'
-        ).order_by('resolution').desc().first().download(
-            output_path=TEMP_DIR,
-            filename_prefix="temp_"
-        )
-        
-        # Convert to MP3
+    @staticmethod
+    async def convert_to_mp3(video_path: str):
+        """Convert video to MP3"""
         mp3_path = os.path.join(TEMP_DIR, "audio.mp3")
         video_clip = VideoFileClip(video_path)
         audio_clip = video_clip.audio
         audio_clip.write_audiofile(mp3_path)
         audio_clip.close()
         video_clip.close()
+        return mp3_path
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command handler"""
+    await BotUI.show_main_menu(update)
+    return MENU
+
+async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle download request"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        text="📩 <b>Please send me the YouTube link:</b>\n\n"
+             "Example: https://youtu.be/example",
+        parse_mode=ParseMode.HTML
+    )
+    return PROCESSING_LINK
+
+async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process YouTube link"""
+    url = update.message.text
+    
+    # Validate URL
+    if not re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.?be)/', url):
+        await update.message.reply_text(
+            "❌ <b>Invalid YouTube URL!</b>\n"
+            "Please send a valid YouTube link.",
+            parse_mode=ParseMode.HTML
+        )
+        return PROCESSING_LINK
+    
+    try:
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        yt = YouTube(url)
         
-        # Kirim file
+        # Save video info for later use
+        context.user_data['video_info'] = {
+            'url': url,
+            'title': yt.title,
+            'author': yt.author,
+            'length': yt.length
+        }
+        
+        await BotUI.show_video_info(update, yt)
+        return CHOOSING_FORMAT
+        
+    except Exception as e:
+        logger.error(f"Error processing video: {e}")
+        await update.message.reply_text(
+            "❌ <b>Error processing video!</b>\n"
+            "Please try another link.",
+            parse_mode=ParseMode.HTML
+        )
+        return PROCESSING_LINK
+
+async def download_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle MP3 download request"""
+    query = update.callback_query
+    await query.answer()
+    
+    video_info = context.user_data.get('video_info')
+    if not video_info:
+        await query.edit_message_text("❌ Session expired! Please start again.")
+        return MENU
+    
+    try:
+        await query.edit_message_text("⏳ <b>Preparing audio download...</b>", parse_mode=ParseMode.HTML)
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.RECORD_AUDIO)
+        
+        yt = YouTube(video_info['url'])
+        
+        # Download with progress
+        video_path = await YouTubeDownloader.download_video(yt)
+        await BotUI.show_progress(update, 50, 100, "MP3")
+        
+        # Convert to MP3
+        await query.edit_message_text("🔄 <b>Converting to MP3...</b>", parse_mode=ParseMode.HTML)
+        mp3_path = await YouTubeDownloader.convert_to_mp3(video_path)
+        await BotUI.show_progress(update, 80, 100, "MP3")
+        
+        # Send audio file
+        await query.edit_message_text("📤 <b>Uploading audio...</b>", parse_mode=ParseMode.HTML)
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.UPLOAD_AUDIO)
+        
         with open(mp3_path, 'rb') as audio_file:
             await context.bot.send_audio(
-                chat_id=chat_id,
+                chat_id=update.effective_chat.id,
                 audio=audio_file,
-                title=yt.title[:30],
-                performer=yt.author,
-                duration=yt.length
+                title=video_info['title'][:30],
+                performer=video_info['author'],
+                duration=video_info['length']
             )
         
-        # Bersihkan file
+        # Cleanup
         os.remove(video_path)
         os.remove(mp3_path)
         
-        await context.bot.send_message(
-            chat_id,
-            f"{ICONS['success']} Berhasil diunduh sebagai MP3!",
-            parse_mode='Markdown'
+        await query.edit_message_text(
+            "✅ <b>Audio download complete!</b>\n"
+            "Enjoy your music! 🎧",
+            parse_mode=ParseMode.HTML
         )
+        
+        await BotUI.show_main_menu(update)
+        return MENU
         
     except Exception as e:
-        logger.error(f"MP3 error: {e}")
-        raise
+        logger.error(f"MP3 download error: {e}")
+        await query.edit_message_text(
+            "❌ <b>Failed to download audio!</b>\n"
+            "Please try again later.",
+            parse_mode=ParseMode.HTML
+        )
+        return MENU
 
-async def download_mp4(update: Update, context: ContextTypes.DEFAULT_TYPE, yt: YouTube):
-    """Download sebagai MP4"""
-    chat_id = update.effective_chat.id
+async def download_mp4(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle MP4 download request"""
+    query = update.callback_query
+    await query.answer()
+    
+    video_info = context.user_data.get('video_info')
+    if not video_info:
+        await query.edit_message_text("❌ Session expired! Please start again.")
+        return MENU
     
     try:
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+        await query.edit_message_text("⏳ <b>Preparing video download...</b>", parse_mode=ParseMode.HTML)
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.RECORD_VIDEO)
         
-        video = yt.streams.filter(
-            progressive=True,
-            file_extension='mp4'
-        ).order_by('resolution').desc().first()
+        yt = YouTube(video_info['url'])
         
-        video_path = video.download(
-            output_path=TEMP_DIR,
-            filename="video.mp4"
-        )
+        # Download with progress
+        video_path = await YouTubeDownloader.download_video(yt)
+        await BotUI.show_progress(update, 50, 100, "MP4")
+        
+        # Send video file
+        await query.edit_message_text("📤 <b>Uploading video...</b>", parse_mode=ParseMode.HTML)
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.UPLOAD_VIDEO)
         
         with open(video_path, 'rb') as video_file:
             await context.bot.send_video(
-                chat_id=chat_id,
+                chat_id=update.effective_chat.id,
                 video=video_file,
-                caption=yt.title[:60],
-                supports_streaming=True
+                caption=video_info['title'][:60],
+                supports_streaming=True,
+                width=1280,
+                height=720
             )
         
+        # Cleanup
         os.remove(video_path)
-        await context.bot.send_message(
-            chat_id,
-            f"{ICONS['success']} Berhasil diunduh sebagai MP4!",
-            parse_mode='Markdown'
+        
+        await query.edit_message_text(
+            "✅ <b>Video download complete!</b>\n"
+            "Enjoy your video! 🎬",
+            parse_mode=ParseMode.HTML
         )
         
+        await BotUI.show_main_menu(update)
+        return MENU
+        
     except Exception as e:
-        logger.error(f"MP4 error: {e}")
-        raise
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menampilkan pesan bantuan"""
-    help_text = (
-        f"{ICONS['menu']} *Bantuan YouTube Downloader*\n\n"
-        "🔹 Cara menggunakan:\n"
-        "1. Pilih menu Download\n"
-        "2. Kirim link video YouTube\n"
-        "3. Pilih format (MP3/MP4)\n"
-        "4. Tunggu proses selesai\n\n"
-        "⚠️ Catatan:\n"
-        "- Maksimal ukuran video 50MB\n"
-        "- Hasil download bersifat sementara\n\n"
-        "🔗 Contoh link yang valid:\n"
-        "https://youtu.be/contoh\n"
-        "https://www .youtube.com/watch?v=contoh"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton("⬅️ Kembali ke Menu", callback_data='menu')]
-    ]
-    
-    await update.message.reply_text(
-        help_text,
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode='Markdown'
-    )
+        logger.error(f"MP4 download error: {e}")
+        await query.edit_message_text(
+            "❌ <b>Failed to download video!</b>\n"
+            "Please try again later.",
+            parse_mode=ParseMode.HTML
+        )
+        return MENU
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Membatalkan operasi dan kembali ke menu"""
-    await show_main_menu(update, context)
-    return SELECTING_ACTION
+    """Cancel current operation"""
+    await BotUI.show_main_menu(update)
+    return MENU
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Menangani error"""
+    """Handle errors gracefully"""
     logger.error("Exception:", exc_info=context.error)
     
-    if isinstance(update, Update) and update.message:
-        await update.message.reply_text(
-            f"{ICONS['error']} Terjadi kesalahan. Silakan coba lagi.",
-            parse_mode='Markdown'
-        )
-        await show_main_menu(update, context)
+    error_text = """
+❌ <b>Something went wrong!</b>
+
+We encountered an unexpected error. 
+Please try again or /start a new session."""
     
-    return SELECTING_ACTION
+    if isinstance(update, Update):
+        if update.message:
+            await update.message.reply_text(error_text, parse_mode=ParseMode.HTML)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(error_text, parse_mode=ParseMode.HTML)
+    
+    return MENU
 
 def main():
-    """Menjalankan bot"""
-    app = Application.builder().token(TOKEN).build()
+    """Start the bot"""
+    # Create application with timeout settings
+    application = Application.builder() \
+        .token(TOKEN) \
+        .read_timeout(30) \
+        .write_timeout(30) \
+        .connect_timeout(30) \
+        .build()
     
-    # Setup ConversationHandler
+    # Setup conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            SELECTING_ACTION: [
+            MENU: [
                 CallbackQueryHandler(handle_download, pattern='^download$'),
-                CallbackQueryHandler(help_command, pattern='^help$'),
-                CallbackQueryHandler(start, pattern='^menu$')
+                CallbackQueryHandler(cancel, pattern='^back$'),
+                CallbackQueryHandler(cancel, pattern='^settings$'),
+                CallbackQueryHandler(cancel, pattern='^help$')
             ],
             PROCESSING_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_youtube_link),
-                CallbackQueryHandler(cancel, pattern='^cancel$')
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_link),
+                CallbackQueryHandler(cancel, pattern='^back$')
             ],
             CHOOSING_FORMAT: [
-                CallbackQueryHandler(process_format_selection, pattern='^(mp3|mp4)$'),
-                CallbackQueryHandler(cancel, pattern='^cancel$')
+                CallbackQueryHandler(download_mp3, pattern='^mp3$'),
+                CallbackQueryHandler(download_mp4, pattern='^mp4$'),
+                CallbackQueryHandler(cancel, pattern='^back$')
             ]
         },
-        fallbacks=[CommandHandler('start', start)]
+        fallbacks=[CommandHandler('start', start)],
+        conversation_timeout=300  # 5 minutes timeout
     )
     
-    app.add_handler(conv_handler)
-    app.add_error_handler(error_handler)
+    application.add_handler(conv_handler)
+    application.add_error_handler(error_handler)
     
-    # Jalankan bot
-    if os.getenv('RAILWAY_ENVIRONMENT'):
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=f"https://{os.getenv('RAILWAY_STATIC_URL')}/{TOKEN}"
-        )
-    else:
-        app.run_polling()
+    # Run bot
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main() 
+    main()
